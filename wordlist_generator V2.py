@@ -15,25 +15,32 @@ from datetime import datetime
 # Configuration
 # ----------------------------------------------------------------------
 # Common symbols to append if enabled
-SYMBOLS = ['!', '@', '#', '$', '%', '^', '&', '*', '?', '.']
+def unique_preserve_order(values):
+    """Return values with duplicates removed while preserving order."""
+    return list(dict.fromkeys(values))
+
+SYMBOLS = unique_preserve_order(['!', '@', '#', '$', '%', '^', '&', '*', '?', '.'])
 
 # Common number suffixes to append if enabled
-NUMBERS = [
+NUMBERS = unique_preserve_order([
     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+    '01', '07', '10', '12',
     '00', '11', '22', '33', '44', '55', '66', '77', '88', '99',
-    '123', '1234', '2020', '2021', '2022', '2023', '2024', '2025'
-]
+    '111', '123', '321', '420', '666', '777', '888', '999',
+    '1234', '12345', '123456',
+    '2020', '2021', '2022', '2023', '2024', '2025', '2026', '2027'
+])
 
 # Separators to insert between combined words (if enabled)
 SEPARATORS = ['', '_', '-', '.', '@', '#', '$']  # empty = no separator
 
 # Leet mapping (case‑insensitive, applied to original case)
 LEET_MAP = {
-    'a': '@', 'A': '@',
-    'e': '3', 'E': '3',
-    'i': '1', 'I': '1',
-    'o': '0', 'O': '0',
-    's': '$', 'S': '$'
+    'a': '@',
+    'e': '3',
+    'i': '1',
+    'o': '0',
+    's': '$'
 }
 
 # Tags that are considered "date‑like" and may need special handling
@@ -50,7 +57,7 @@ def leet_transform(word):
     """Apply basic leet substitution to a word."""
     if not word:
         return word
-    return ''.join(LEET_MAP.get(ch, ch) for ch in word)
+    return ''.join(LEET_MAP.get(ch.lower(), ch) for ch in word)
 
 def case_variations(word):
     """Return a set of common case variations for a word."""
@@ -251,6 +258,8 @@ def run_questionnaire():
         profile.max_len = int(ask_string("Maximum password length (default 16): ") or "16")
     except ValueError:
         profile.max_len = 16
+    profile.min_len = max(1, profile.min_len)
+    profile.max_len = max(profile.min_len, profile.max_len)
 
     return profile
 
@@ -262,6 +271,36 @@ class WordlistGenerator:
     def __init__(self, profile):
         self.profile = profile
         self.words = set()
+        self.suffixes = self._build_suffixes()
+        self.min_source_len = self._get_min_source_len()
+
+    def _build_suffixes(self):
+        """Build the suffix list once so generation can respect final length limits."""
+        suffixes = []
+        if self.profile.append_symbols:
+            suffixes.extend(SYMBOLS)
+        if self.profile.append_numbers:
+            suffixes.extend(NUMBERS)
+        return suffixes
+
+    def _get_min_source_len(self):
+        """Allow shorter base words only when suffixes could bring them into range."""
+        if not self.suffixes:
+            return self.profile.min_len
+        max_suffix_len = max(len(suffix) for suffix in self.suffixes)
+        return max(1, self.profile.min_len - max_suffix_len)
+
+    def _store_word(self, word):
+        """Store a word only if it can still fit the requested final length range."""
+        if self.min_source_len <= len(word) <= self.profile.max_len:
+            self.words.add(word)
+
+    def _store_variations(self, word):
+        """Store case variations for words that are viable for the requested range."""
+        if not word:
+            return
+        for variation in case_variations(word):
+            self._store_word(variation)
 
     def add_leet_variations(self):
         """For every string in every tag, add its leet version if different."""
@@ -278,7 +317,7 @@ class WordlistGenerator:
         """Generate case variations for all strings in all tags."""
         for values in self.profile.data.values():
             for val in values:
-                self.words.update(case_variations(val))
+                self._store_variations(val)
 
     def generate_combinations(self):
         """
@@ -338,23 +377,19 @@ class WordlistGenerator:
                     for sep in separators:
                         combined = sep.join(perm_product)
                         if combined:
-                            # Add case variations
-                            self.words.update(case_variations(combined))
+                            self._store_variations(combined)
         print()  # newline after progress
 
     def apply_suffixes(self):
         """Append symbol and/or number suffixes to each word."""
-        if not (self.profile.append_symbols or self.profile.append_numbers):
+        if not self.suffixes:
             return
-        suffixes = []
-        if self.profile.append_symbols:
-            suffixes.extend(SYMBOLS)
-        if self.profile.append_numbers:
-            suffixes.extend(NUMBERS)
         new_words = set()
         for word in self.words:
-            for suffix in suffixes:
-                new_words.add(word + suffix)
+            for suffix in self.suffixes:
+                candidate = word + suffix
+                if self.profile.min_len <= len(candidate) <= self.profile.max_len:
+                    new_words.add(candidate)
         self.words.update(new_words)
 
     def filter_by_length(self):
@@ -400,11 +435,16 @@ class WordlistGenerator:
         return True
 
     def write_to_file(self, filename="deep_profile_wordlist.txt"):
-        """Write the wordlist to a file, one word per line."""
+        """Write the wordlist shortest-to-longest, one word per line."""
         try:
             with open(filename, 'w', encoding='utf-8') as f:
-                for word in sorted(self.words):
-                    f.write(word + '\n')
+                words_by_length = defaultdict(list)
+                for word in self.words:
+                    words_by_length[len(word)].append(word)
+
+                for length in range(self.profile.min_len, self.profile.max_len + 1):
+                    for word in sorted(words_by_length.get(length, []), key=lambda value: (value.lower(), value)):
+                        f.write(word + '\n')
         except IOError as e:
             print(f"Error writing file: {e}")
             return False
