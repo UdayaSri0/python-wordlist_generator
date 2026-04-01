@@ -6,6 +6,7 @@ Generates a highly targeted wordlist based on detailed user profiling.
 
 import itertools
 import os
+import re
 import sys
 import time
 from collections import defaultdict
@@ -272,6 +273,7 @@ class WordlistGenerator:
         self.profile = profile
         self.words = set()
         self.suffixes = self._build_suffixes()
+        self.simple_pattern_numbers = self._build_simple_pattern_numbers()
         self.min_source_len = self._get_min_source_len()
 
     def _build_suffixes(self):
@@ -289,6 +291,48 @@ class WordlistGenerator:
             return self.profile.min_len
         max_suffix_len = max(len(suffix) for suffix in self.suffixes)
         return max(1, self.profile.min_len - max_suffix_len)
+
+    def _build_simple_pattern_numbers(self):
+        """
+        Build a focused numeric pool for common patterns like name@123.
+        This keeps the list targeted while also including profile-specific digits.
+        """
+        numbers = list(NUMBERS)
+        for values in self.profile.data.values():
+            for value in values:
+                for chunk in re.findall(r'\d+', value):
+                    if 1 <= len(chunk) <= 6:
+                        numbers.append(chunk)
+                    if len(chunk) > 4:
+                        numbers.append(chunk[-4:])
+                    if len(chunk) > 2:
+                        numbers.append(chunk[-2:])
+        return unique_preserve_order(numbers)
+
+    def _store_final_variations(self, word):
+        """Store final-form candidates that already include their suffix pattern."""
+        if not word:
+            return
+        for variation in case_variations(word):
+            if self.profile.min_len <= len(variation) <= self.profile.max_len:
+                self.words.add(variation)
+
+    def _collect_core_words(self):
+        """
+        Collect human-readable source words for simple patterns.
+        Numeric-only values are skipped because they already participate in combinations.
+        """
+        core_words = []
+        for values in self.profile.data.values():
+            for value in values:
+                cleaned = value.strip()
+                if not cleaned or not any(ch.isalpha() for ch in cleaned):
+                    continue
+                core_words.append(cleaned)
+                compact = re.sub(r'[\W_]+', '', cleaned)
+                if compact and compact != cleaned:
+                    core_words.append(compact)
+        return unique_preserve_order(core_words)
 
     def _store_word(self, word):
         """Store a word only if it can still fit the requested final length range."""
@@ -380,6 +424,24 @@ class WordlistGenerator:
                             self._store_variations(combined)
         print()  # newline after progress
 
+    def generate_simple_patterns(self):
+        """
+        Generate common password shapes such as word@123 and word123@.
+        These are based on raw profile words so simple guesses are not missed.
+        """
+        if not (self.profile.append_symbols and self.profile.append_numbers):
+            return
+
+        core_words = self._collect_core_words()
+        if not core_words or not self.simple_pattern_numbers:
+            return
+
+        for word in core_words:
+            for symbol in SYMBOLS:
+                for number in self.simple_pattern_numbers:
+                    self._store_final_variations(f"{word}{symbol}{number}")
+                    self._store_final_variations(f"{word}{number}{symbol}")
+
     def apply_suffixes(self):
         """Append symbol and/or number suffixes to each word."""
         if not self.suffixes:
@@ -420,7 +482,13 @@ class WordlistGenerator:
             self.apply_suffixes()
             print(f"  -> after suffixes: {len(self.words)} words.")
 
-        # Step 5: Filter by length
+        # Step 5: Common simple patterns
+        if self.profile.append_symbols and self.profile.append_numbers:
+            print("Generating simple symbol+number patterns...")
+            self.generate_simple_patterns()
+            print(f"  -> after simple patterns: {len(self.words)} words.")
+
+        # Step 6: Filter by length
         print("Filtering by length...")
         self.filter_by_length()
         print(f"  -> after length filter: {len(self.words)} words.")
